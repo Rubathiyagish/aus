@@ -129,23 +129,26 @@
       `   any step-by-step procedure. Be accurate and neutral; do not add opinions.`,
       `6. Include a diagram ONLY when it genuinely helps — a real hierarchy, reporting line,`,
       `   org structure, or a multi-step process with connected stages. Do NOT make a diagram`,
-      `   for simple lists, definitions, aims/objectives, or single-topic answers; leave it empty`,
-      `   in those cases. When you do include one, use a Mermaid flowchart:`,
-      `   - Begin with "flowchart TD", "flowchart BT" (bottom-up, good for reporting lines that`,
-      `     point upward), or "flowchart LR".`,
-      `   - Wrap every node label in double quotes, e.g. A["Audit and Compliance Committee (ACC)"].`,
-      `   - Use --> for each connection, in the real direction of flow or reporting.`,
-      `   - Use ONLY entities named in the handbook text. Never invent nodes or links.`,
-      `   - Valid Mermaid only, no code fences, no commentary.`,
+      `   for simple lists, definitions, aims/objectives, or single-topic answers. When you do`,
+      `   include one, put it INSIDE your answer as a fenced code block that starts with a line`,
+      "   of ```mermaid and ends with a line of ``` , for example:",
+      "   ```mermaid",
+      `   flowchart TD`,
+      `   A["Step one"] --> B["Step two"]`,
+      "   ```",
+      `   Mermaid rules: begin with flowchart TD, BT (bottom-up, for reporting lines that point`,
+      `   upward), or LR; wrap every node label in double quotes; use --> for links; use ONLY`,
+      `   entities named in the handbook; valid Mermaid only.`,
       ``,
       `OUTPUT FORMAT — follow this exactly:`,
-      `First, write your reply to the user in GitHub-flavored markdown (this is what they read).`,
+      `First, write your reply to the user in GitHub-flavored markdown (include a \`\`\`mermaid`,
+      `code block only if a diagram genuinely helps).`,
       `Then output a line containing exactly:`,
       `===META===`,
       `Then, on the next line, ONE minified JSON object and nothing after it:`,
-      `{"diagram":"<Mermaid flowchart or empty string>","sources":[{"label":"§6.1 Academic Integrity","page":27}],"in_handbook":true}`,
-      `Rules: "sources" is an array (empty when not applicable); "page" is an integer; for a`,
-      `Mermaid diagram write newlines as \\n inside the JSON string. Write nothing after the JSON.`,
+      `{"sources":[{"label":"§6.1 Academic Integrity","page":27}],"in_handbook":true}`,
+      `Rules: "sources" is an array (empty when not applicable); "page" is an integer.`,
+      `Write nothing after the JSON.`,
       ``,
       `<handbook>`,
       handbookText,
@@ -313,18 +316,23 @@
     let hasText = false;
     return {
       update(answer) {
-        if (!answer) return;
+        const shown = stripStreamingFences(answer);
+        if (!shown) return;               // keep typing dots until real prose appears
         hasText = true;
-        bubble.innerHTML = renderMarkdown(answer);
+        bubble.innerHTML = renderMarkdown(shown);
         scrollToBottom();
       },
       finalize(reply) {
-        bubble.innerHTML = renderMarkdown(reply.answer || "");
-        if (reply.diagram && window.mermaid) {
-          const box = document.createElement("div");
-          box.className = "diagram";
-          bubble.appendChild(box);
-          renderDiagram(box, reply.diagram);
+        const { text, diagrams } = extractDiagrams(reply.answer || "");
+        bubble.innerHTML = renderMarkdown(text);
+        const charts = diagrams.length ? diagrams : (reply.diagram ? [reply.diagram] : []);
+        if (window.mermaid) {
+          for (const code of charts) {
+            const box = document.createElement("div");
+            box.className = "diagram";
+            bubble.appendChild(box);
+            renderDiagram(box, code);
+          }
         }
         if (reply.inHandbook && reply.sources && reply.sources.length) {
           bubble.appendChild(renderSources(reply.sources));
@@ -332,7 +340,7 @@
         scrollToBottom();
       },
       stopHere() {
-        if (!hasText) wrap.remove();   // nothing streamed yet: drop empty bubble
+        if (!hasText) wrap.remove();
       },
       remove() { wrap.remove(); }
     };
@@ -457,26 +465,51 @@
     return wrap;
   }
 
-  // Minimal, safe markdown -> HTML (escapes first, then formats).
-  function renderMarkdown(md) {
-    let s = escapeHtml(md || "");
+  // Extract ```mermaid``` blocks from answer text. Returns cleaned text + diagram codes.
+  function extractDiagrams(text) {
+    const diagrams = [];
+    const clean = (text || "").replace(/```[ \t]*([A-Za-z0-9_-]+)?[ \t]*\r?\n([\s\S]*?)```/g, (m, lang, code) => {
+      const c = (code || "").trim();
+      const isMermaid = (lang && lang.toLowerCase() === "mermaid") ||
+        /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(-v2)?|erDiagram|gantt|pie|mindmap|journey)\b/i.test(c);
+      if (isMermaid) { diagrams.push(c); return ""; }
+      return m;   // leave real (non-mermaid) code blocks in place
+    });
+    return { text: clean.replace(/\n{3,}/g, "\n\n").trim(), diagrams };
+  }
 
-    // inline: bold, italic, code
+  // While streaming, hide fenced blocks so raw code never flashes on screen.
+  function stripStreamingFences(s) {
+    s = (s || "").replace(/```[\s\S]*?```/g, "");
+    const i = s.indexOf("```");
+    if (i !== -1) s = s.slice(0, i);
+    return s.trim();
+  }
+
+  function inlineFmt(str) {
+    let s = escapeHtml(str);
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    return s;
+  }
 
-    const lines = s.split("\n");
-    let html = "", listType = null, buf = [];
+  // Markdown -> HTML: supports code fences, headings, lists, blockquotes, inline.
+  function renderMarkdown(md) {
+    const lines = (md || "").split("\n");
+    let html = "", listType = null, buf = [], inCode = false, codeBuf = [];
 
-    const flushPara = () => {
-      if (buf.length) { html += `<p>${buf.join("<br>")}</p>`; buf = []; }
-    };
-    const closeList = () => {
-      if (listType) { html += `</${listType}>`; listType = null; }
-    };
+    const flushPara = () => { if (buf.length) { html += `<p>${buf.join("<br>")}</p>`; buf = []; } };
+    const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
 
     for (const line of lines) {
+      if (/^\s*```/.test(line)) {
+        if (!inCode) { flushPara(); closeList(); inCode = true; codeBuf = []; }
+        else { html += `<pre><code>${escapeHtml(codeBuf.join("\n"))}</code></pre>`; inCode = false; }
+        continue;
+      }
+      if (inCode) { codeBuf.push(line); continue; }
+
       const t = line.trim();
       const hd = t.match(/^(#{1,6})\s+(.*)$/);
       const ol = t.match(/^\d+[.)]\s+(.*)$/);
@@ -485,26 +518,27 @@
 
       if (hd) {
         flushPara(); closeList();
-        const level = hd[1].length <= 2 ? 3 : 4;   // #/## -> h3, ###+ -> h4
-        html += `<h${level}>${hd[2]}</h${level}>`;
+        const level = hd[1].length <= 2 ? 3 : 4;
+        html += `<h${level}>${inlineFmt(hd[2])}</h${level}>`;
       } else if (ol) {
         flushPara();
         if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; }
-        html += `<li>${ol[1]}</li>`;
+        html += `<li>${inlineFmt(ol[1])}</li>`;
       } else if (ul) {
         flushPara();
         if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; }
-        html += `<li>${ul[1]}</li>`;
+        html += `<li>${inlineFmt(ul[1])}</li>`;
       } else if (bq) {
         flushPara(); closeList();
-        html += `<blockquote>${bq[1]}</blockquote>`;
+        html += `<blockquote>${inlineFmt(bq[1])}</blockquote>`;
       } else if (t === "") {
         flushPara(); closeList();
       } else {
         if (listType) closeList();
-        buf.push(t);
+        buf.push(inlineFmt(t));
       }
     }
+    if (inCode) html += `<pre><code>${escapeHtml(codeBuf.join("\n"))}</code></pre>`;
     flushPara(); closeList();
     return html;
   }
@@ -577,10 +611,13 @@
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input.value); }
   });
 
-  document.getElementById("examples").addEventListener("click", e => {
-    const b = e.target.closest(".example");
-    if (b) send(b.textContent);
-  });
+  const examplesEl = document.getElementById("examples");
+  if (examplesEl) {
+    examplesEl.addEventListener("click", e => {
+      const b = e.target.closest(".example");
+      if (b) send(b.textContent);
+    });
+  }
 
   newChatBtn.addEventListener("click", () => {
     history = [];
