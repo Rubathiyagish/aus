@@ -251,6 +251,15 @@ body {
   border-radius: 4px;
   padding: 1px 5px;
 }
+.msg__bubble pre {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 10px 0;
+}
+.msg__bubble pre code { background: none; border: none; padding: 0; font-size: 12.5px; }
 .msg__bubble blockquote {
   font-family: var(--serif);
   font-size: 17px;
